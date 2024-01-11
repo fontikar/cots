@@ -1,0 +1,311 @@
+---
+title: "ALA and temperature data"
+author: "Fonti Kar"
+date: "2024-01-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pacman::p_load(galah, tidyverse, oce, ocedata, ncdf4, sf, ggplot2, lubridate, ozmaps, raster, sp, tidync, rerddap, doParallel, patchwork, scales)
+```
+
+## Get ALA data
+
+```{r}
+galah_config(email = Sys.getenv("ALA_EMAIL"),
+             atlas = "Australia",
+             download_reason_id = 5)
+
+
+galah_call() |> 
+  galah_identify("Acanthaster planci") |> 
+  galah_apply_profile(ALA) |> 
+  atlas_counts()
+
+cot_general <- galah_call() |> 
+  galah_identify("Acanthaster planci") |> 
+  galah_apply_profile(ALA) |> 
+  galah_select(group = "basic", datasetName, dataResourceName) |> 
+  atlas_occurrences()
+```
+
+Australian map
+
+```{r}
+aus_sf <- st_transform(ozmaps::ozmap_states, crs = 4326)
+```
+
+```{r}
+cot_clean <- cot_general |> 
+  drop_na(decimalLatitude, decimalLongitude) |> 
+  filter(duplicated(decimalLatitude) | duplicated(decimalLongitude))
+
+cot_clean_date <- cot_clean |> 
+  mutate(eventDate = as_date(eventDate), 
+         eventDate = ymd(eventDate), 
+         year = year(eventDate)) 
+```
+
+Clean to mainland
+
+```{r}
+cot_mainland <- cot_clean_date |> 
+  filter(decimalLatitude < -10, decimalLatitude >= -45,
+         decimalLongitude >= 113, decimalLongitude <= 155) 
+```
+
+Transform to sf
+
+```{r}
+cot_sf <- cot_mainland |> 
+  select(scientificName, eventDate, year, decimalLongitude, decimalLatitude) |> 
+  st_as_sf(coords = c("decimalLongitude", "decimalLatitude"), 
+         crs = 4326)
+```
+
+Plot COT ALA distribution 
+```{r}
+ggplot() + 
+  geom_sf(data = aus_sf) + 
+  geom_sf(data = cot_sf) 
+```
+
+By year
+
+```{r}
+year_data <- cot_clean_date |> 
+  group_by(year) |> 
+  summarise(n_obs = n()) |> 
+  arrange(year) |> 
+  print(n = Inf) |> 
+  filter(year > 1981)
+
+cot_obs <- ggplot(data = year_data, 
+                  aes(x = year, y = n_obs)) + 
+  geom_col() + 
+  scale_y_continuous(breaks = breaks_extended(n = 10))
+```
+
+
+## Get temperature data
+
+```{r}
+cot_mainland |> 
+  arrange(desc(eventDate)) |> 
+  mutate(ymd = ymd(eventDate))
+```
+
+```{r}
+# choose date
+dt = as.Date('2023-06-08')
+
+# convert date to new format
+month_dt = format(dt, '%Y%m')
+full_dt = format(dt, '%Y%m%d')
+
+# assemble url to query NOAA database
+url_base = paste0("https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/", month_dt, "/")
+
+data_file = paste0("oisst-avhrr-v02r01.", full_dt, ".nc")
+
+# define data url
+data_url = paste0(url_base, data_file)
+
+# download netcdf
+if(!file.exists(data_file)){
+  download.file(url = data_url, destfile = data_file)
+} else {
+  message('SST data already downloaded! Located at:\n', data_file)
+}
+
+# open netcdf file and extract variables
+nc = nc_open(paste0("data/",data_file))
+
+# view netcf metadata
+nc
+
+# extract data
+
+lat = ncvar_get(nc, "lat")
+lon = ncvar_get(nc, "lon")
+time = ncvar_get(nc, "time")
+sst = ncvar_get(nc, "sst")
+
+# close netcdf
+nc_close(nc)
+
+# convert timestamp
+time = as.POSIXct(time, origin = '1981-01-01 00:00:00', tz = 'UTC')
+```
+
+```{r}
+sst <- raster("data/oisst-avhrr-v02r01.20230608.nc", 
+             varname = "sst")
+
+proj4string(sst) <-CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+
+sst.df <- 
+  raster::as.data.frame(sst, xy = TRUE, level = 180) |> 
+  as_tibble() |> 
+  rename(longitude = x, 
+         latitude = y,
+         sst = Daily.sea.surface.temperature)
+
+summary(sst.df)
+
+sst.df |> 
+  filter(latitude <=-10 & latitude >= -25,
+         longitude <=-115 & longitude >= -141)
+
+
+```
+
+tidync way
+
+```{r}
+# open netcdf file and extract variables
+nc = tidync(paste0("data/",data_file))
+
+# view netcf metadata
+nc 
+
+# extract data
+nc %>% 
+  hyper_tibble(select_var = "sst") |> 
+  filter(lat <=-10 & lat >= -25)
+
+
+lat = ncvar_get(nc, "lat")
+lon = ncvar_get(nc, "lon")
+time = ncvar_get(nc, "time")
+sst = ncvar_get(nc, "sst")
+
+# close netcdf
+nc_close(nc)
+
+
+which(lat <=(-10) & lat >=(-25))
+
+temp_QLD <- sst[,261:320]
+temp_QLD_raster <- raster(temp_QLD)
+
+temp_QLD_raster_df <- temp_QLD_raster |> raster::as.data.frame(xy = TRUE)
+
+names(temp_QLD_raster)
+head(temp_QLD_raster)
+
+ggplot() +
+  geom_raster(data = temp_QLD_raster_df, aes(x = x, y = y, fill = layer))
+plot(t(temp_QLD_raster))
+```
+
+https://cran.r-project.org/web/packages/heatwaveR/vignettes/OISST_preparation.html
+
+```{r}
+# Meta-data
+rerddap::info(datasetid = "ncdcOisst21Agg_LonPM180", url = "https://coastwatch.pfeg.noaa.gov/erddap/")
+
+
+OISST_sub_dl <- function(time_df){
+  OISST_dat <- griddap(datasetx = "ncdcOisst21Agg_LonPM180", 
+                       url = "https://coastwatch.pfeg.noaa.gov/erddap/", 
+                       time = c(time_df$start, time_df$end), 
+                       zlev = c(0, 0),
+                       latitude = c(-10, -45),
+                       longitude = c(113, 155),
+                       fields = "sst")$data %>% 
+    mutate(time = as.Date(stringr::str_remove(time, "T00:00:00Z"))) %>% 
+    dplyr::rename(t = time, temp = sst) %>% 
+    dplyr::select(longitude, latitude, t, temp) %>% 
+    na.omit()
+}
+
+# Date download range by start and end dates per year
+dl_years <- data.frame(date_index = 1:5,
+                       start = as.Date(c("1982-01-01", "1990-01-01", 
+                                         "1998-01-01", "2006-01-01", "2014-01-01")),
+                       end = as.Date(c("1989-12-31", "1997-12-31", 
+                                       "2005-12-31", "2013-12-31", "2019-12-31")))
+
+
+# Start and end of year dates for ALA data
+min(cot_clean_date$eventDate, na.rm = TRUE)
+max(cot_clean_date$eventDate, na.rm = TRUE)
+
+# Get ranges by year
+cot_data_ranges <- cot_clean_date |> 
+  drop_na(year) |> 
+  group_by(year) |> 
+  summarise(n_obs = n(),
+            start_y = min(eventDate, na.rm = TRUE),
+            end_y = max(eventDate, na.rm = TRUE)) |> 
+  print(n = Inf)
+
+# Are some the same for start and end = once of obs
+cot_data_ranges <- cot_data_ranges |> 
+  mutate(once_off = start_y == end_y)
+
+# SST data only goes back to 1981
+cot_data_ranges |> 
+  filter(year > 1981)
+
+# Format data ranges as df
+date_ranges <- cot_data_ranges |> 
+  filter(year >= 1981) |> 
+  dplyr::select(start_y, end_y) |> 
+  mutate(date_index = row_number()) |> 
+  dplyr::select(date_index, everything()) |> 
+  rename(start = start_y, end = end_y) |> 
+  mutate(start = as.character(start),
+         end = as.character(end))
+```
+
+```{r}
+job::job({
+system.time(
+  OISST_data <- date_ranges %>% 
+    group_by(date_index) %>% 
+    group_modify(~OISST_sub_dl(.x)) %>% 
+    ungroup() %>% 
+    dplyr::select(longitude:temp)
+)
+  
+  arrow::write_parquet(OISST_data, "data/SST.parquet")
+})
+
+# Create m and y variables
+OISST_data_m_y <- OISST_data |> 
+  mutate(month = month(t),
+         year = year(t)) 
+
+# Get yearly average temperature  for QLD
+OISST_year <- OISST_data_m_y |> 
+  group_by(year) |> 
+  summarise(average_sst = mean(temp, na.rm = TRUE))  |> 
+  ungroup() 
+
+# Get average temperature for daily for QLD
+daily_average <- OISST_data_m_y |> 
+  group_by(t) |> 
+  summarise(average_sst = mean(temp, na.rm = TRUE))  |> 
+  ungroup() |> 
+  mutate(t = as.POSIXct(t))
+
+# Try plot
+temp_plot <- 
+  OISST_year |> 
+  # filter(t < "1985-12-31") |> 
+ggplot(aes(x = year, y = average_sst, group = 1)) +
+  geom_line() + 
+  # scale_x_datetime(date_breaks = "2 years", 
+  #              labels = label_date_short()) + 
+  scale_y_continuous(breaks = breaks_extended(10))
+
+
+plot_layout(cot_obs / temp_plot)
+```
+
+
+
