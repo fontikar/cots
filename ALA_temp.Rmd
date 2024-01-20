@@ -8,7 +8,10 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-pacman::p_load(galah, tidyverse, oce, ocedata, ncdf4, sf, ggplot2, lubridate, ozmaps, raster, sp, tidync, rerddap, doParallel, patchwork, scales)
+pacman::p_load(galah, tidyverse, dplyr, oce, ocedata, ncdf4, sf, ggplot2, lubridate, ozmaps, raster, sp, tidync, rerddap, doParallel, patchwork, scales, arrow)
+
+# Australia map
+aus_sf <- st_transform(ozmaps::ozmap_states, crs = 4326)
 ```
 
 ## Get ALA data
@@ -29,13 +32,11 @@ cot_general <- galah_call() |>
   galah_apply_profile(ALA) |> 
   galah_select(group = "basic", datasetName, dataResourceName) |> 
   atlas_occurrences()
+
+arrow::write_parquet(cot_general, paste0("data/galah/",Sys.Date(),"-cots.parquet"))
 ```
 
-Australian map
-
-```{r}
-aus_sf <- st_transform(ozmaps::ozmap_states, crs = 4326)
-```
+Rough clean
 
 ```{r}
 cot_clean <- cot_general |> 
@@ -46,27 +47,21 @@ cot_clean_date <- cot_clean |>
   mutate(eventDate = as_date(eventDate), 
          eventDate = ymd(eventDate), 
          year = year(eventDate)) 
-```
 
-Clean to mainland
-
-```{r}
+# Clean to mainland
 cot_mainland <- cot_clean_date |> 
   filter(decimalLatitude < -10, decimalLatitude >= -45,
          decimalLongitude >= 113, decimalLongitude <= 155) 
 ```
 
-Transform to sf
+Transform to sf and plot COT dist
 
 ```{r}
 cot_sf <- cot_mainland |> 
-  select(scientificName, eventDate, year, decimalLongitude, decimalLatitude) |> 
+  dplyr::select(scientificName, eventDate, year, decimalLongitude, decimalLatitude) |> 
   st_as_sf(coords = c("decimalLongitude", "decimalLatitude"), 
          crs = 4326)
-```
 
-Plot COT ALA distribution 
-```{r}
 ggplot() + 
   geom_sf(data = aus_sf) + 
   geom_sf(data = cot_sf) 
@@ -76,16 +71,19 @@ By year
 
 ```{r}
 year_data <- cot_clean_date |> 
+  filter(year > 1981) |> 
   group_by(year) |> 
   summarise(n_obs = n()) |> 
   arrange(year) |> 
-  print(n = Inf) |> 
-  filter(year > 1981)
+  print(n = Inf) 
+  
 
 cot_obs <- ggplot(data = year_data, 
                   aes(x = year, y = n_obs)) + 
   geom_col() + 
   scale_y_continuous(breaks = breaks_extended(n = 10))
+
+cot_obs
 ```
 
 
@@ -95,71 +93,6 @@ cot_obs <- ggplot(data = year_data,
 cot_mainland |> 
   arrange(desc(eventDate)) |> 
   mutate(ymd = ymd(eventDate))
-```
-
-```{r}
-# choose date
-dt = as.Date('2023-06-08')
-
-# convert date to new format
-month_dt = format(dt, '%Y%m')
-full_dt = format(dt, '%Y%m%d')
-
-# assemble url to query NOAA database
-url_base = paste0("https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/", month_dt, "/")
-
-data_file = paste0("oisst-avhrr-v02r01.", full_dt, ".nc")
-
-# define data url
-data_url = paste0(url_base, data_file)
-
-# download netcdf
-if(!file.exists(data_file)){
-  download.file(url = data_url, destfile = data_file)
-} else {
-  message('SST data already downloaded! Located at:\n', data_file)
-}
-
-# open netcdf file and extract variables
-nc = nc_open(paste0("data/",data_file))
-
-# view netcf metadata
-nc
-
-# extract data
-
-lat = ncvar_get(nc, "lat")
-lon = ncvar_get(nc, "lon")
-time = ncvar_get(nc, "time")
-sst = ncvar_get(nc, "sst")
-
-# close netcdf
-nc_close(nc)
-
-# convert timestamp
-time = as.POSIXct(time, origin = '1981-01-01 00:00:00', tz = 'UTC')
-```
-
-```{r}
-sst <- raster("data/oisst-avhrr-v02r01.20230608.nc", 
-             varname = "sst")
-
-proj4string(sst) <-CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
-
-sst.df <- 
-  raster::as.data.frame(sst, xy = TRUE, level = 180) |> 
-  as_tibble() |> 
-  rename(longitude = x, 
-         latitude = y,
-         sst = Daily.sea.surface.temperature)
-
-summary(sst.df)
-
-sst.df |> 
-  filter(latitude <=-10 & latitude >= -25,
-         longitude <=-115 & longitude >= -141)
-
-
 ```
 
 tidync way
@@ -203,7 +136,7 @@ plot(t(temp_QLD_raster))
 
 https://cran.r-project.org/web/packages/heatwaveR/vignettes/OISST_preparation.html
 
-```{r}
+```{r, eval=FALSE}
 # Meta-data
 rerddap::info(datasetid = "ncdcOisst21Agg_LonPM180", url = "https://coastwatch.pfeg.noaa.gov/erddap/")
 
@@ -260,9 +193,7 @@ date_ranges <- cot_data_ranges |>
   rename(start = start_y, end = end_y) |> 
   mutate(start = as.character(start),
          end = as.character(end))
-```
 
-```{r}
 job::job({
 system.time(
   OISST_data <- date_ranges %>% 
@@ -274,6 +205,10 @@ system.time(
   
   arrow::write_parquet(OISST_data, "data/SST.parquet")
 })
+```
+
+```{r}
+OISST_data <- read_parquet("data/SST.parquet")
 
 # Create m and y variables
 OISST_data_m_y <- OISST_data |> 
@@ -307,5 +242,102 @@ ggplot(aes(x = year, y = average_sst, group = 1)) +
 plot_layout(cot_obs / temp_plot)
 ```
 
+# Get data for COT ALA data
 
+```{r}
+OISST_data <- open_dataset("data/SST.parquet")
+
+cot_mainland |> 
+  summarise(min_lat = min(decimalLatitude),
+            max_lax = max(decimalLatitude),
+            min_long = min(decimalLongitude),
+            max_long = max(decimalLongitude))
+
+QLD_SST <- OISST_data |> 
+  filter(latitude >= -30, latitude <= -10.6,
+         longitude >= 117, longitude <= 154) |> 
+  collect()
+
+
+cot_mainland$eventDate |> unique()
+OISST_data$latitude |> summary()
+
+ALA_COT_SST <- QLD_SST |> 
+  filter(
+    # latitude %in% round(cot_mainland$decimalLatitude |> unique(),3),
+    # longitude %in% round(cot_mainland$decimalLongitude |> unique(),3),
+    t %in% cot_mainland$eventDate
+  ) 
+```
+
+
+```{r}
+min(cot_mainland$decimalLatitude)
+min(ALA_COT_SST$latitude)
+
+max(cot_mainland$decimalLatitude)
+max(ALA_COT_SST$latitude)
+
+max(cot_mainland$decimalLongitude)
+max(ALA_COT_SST$longitude)
+
+daily_sst_vals <- ALA_COT_SST |> 
+  group_by(t) |> 
+  summarise(mean_sst = mean(temp),
+            min_sst = min(temp),
+            max_sst = max(temp),
+            med_sst = median(temp))
+
+cot_mainland_sst <- cot_mainland |> 
+  left_join(daily_sst_vals, by = join_by(eventDate == t))
+```
+
+```{r}
+cot_mainland_sst |> 
+  ggplot(aes(x = eventDate, y = mean_sst)) + 
+  geom_point() 
+
+cot_sst_sf <- cot_mainland_sst |> 
+  st_as_sf(coords = c("decimalLongitude", "decimalLatitude"), 
+         crs = 4326) |> 
+  mutate(year = year(eventDate), 
+         month = month(eventDate)) |> 
+  filter(year > 1981, ! is.na(year)) 
+
+ggplot() + 
+  geom_sf(data = aus_sf) + 
+  geom_sf(data = cot_sst_sf, aes(color = mean_sst, size = 1)) + 
+  coord_sf(ylim = c(-10, -25), xlim = c(141, 155)) + 
+  theme_minimal() 
+ 
+
+a<- ggplot() + 
+  geom_sf(data = aus_sf) + 
+  geom_sf(data = cot_sst_sf, aes(color = min_sst, size = 1)) + 
+  coord_sf(ylim = c(-10, -25), xlim = c(141, 155)) + 
+  theme_minimal() + 
+  facet_wrap(~month) +
+  ggtitle("min_sst")
+
+ggplot() + 
+  geom_sf(data = aus_sf) + 
+  geom_sf(data = cot_sst_sf, aes(color = min_sst, size = 1)) + 
+  coord_sf(ylim = c(-10, -25), xlim = c(141, 155)) + 
+  theme_minimal() + 
+  facet_wrap(~month) +
+  ggtitle("min_sst")
+
+
+
+
+b<- ggplot() + 
+  geom_sf(data = aus_sf) + 
+  geom_sf(data = cot_sst_sf, aes(color = max_sst, size = 1)) + 
+  coord_sf(ylim = c(-10, -25), xlim = c(141, 155)) + 
+  theme_minimal() + 
+  facet_wrap(~month) +
+  ggtitle("max_sst")
+
+a+b
+```
 
