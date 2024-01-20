@@ -341,3 +341,46 @@ b<- ggplot() +
 a+b
 ```
 
+
+```{r}
+cot_breeding <- cot_sst_sf |> 
+  filter(month %in% c(11,12,1,2))
+
+ggplot() + 
+  geom_sf(data = aus_sf) + 
+  geom_sf(data = cot_breeding, aes(color = max_sst, size = 1)) + 
+  viridis::scale_color_viridis(option = "inferno") + 
+  coord_sf(ylim = c(-10, -25), xlim = c(141, 155)) + 
+  theme_minimal() + 
+  facet_wrap(~month)
+```
+
+Get ALA and temp data around LIR
+
+```{r}
+lir = tibble(decimalLatitude = -14.667, 
+             decimalLongitude = 145.467)
+
+lir_sf <- lir |> 
+  st_as_sf(coords = c("decimalLongitude", "decimalLatitude"), 
+           crs = 4326) 
+
+lir_5k <- lir_sf |> 
+  sf::st_buffer(dist = 5000) 
+
+
+
+ggplot() + 
+  geom_sf(data = aus_sf) + 
+  geom_sf(data = st_intersection(cot_breeding, lir_5k), aes(color = max_sst, size = 1)) + 
+  viridis::scale_color_viridis(option = "inferno") + 
+  coord_sf(ylim = c(-10, -25), xlim = c(141, 155)) + 
+  theme_minimal() +
+  facet_wrap(~month)
+
+st_intersection(cot_breeding, lir_5k)$month
+st_intersection(cot_breeding, lir_5k)$max_sst
+
+st_intersection(cot_breeding, lir_5k)$min_sst
+```
+
