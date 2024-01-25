@@ -16,7 +16,7 @@ aus_sf <- st_transform(ozmaps::ozmap_states, crs = 4326)
 
 ## Get ALA data
 
-```{r}
+```{r, eval=FALSE}
 galah_config(email = Sys.getenv("ALA_EMAIL"),
              atlas = "Australia",
              download_reason_id = 5)
@@ -35,6 +35,13 @@ cot_general <- galah_call() |>
 
 arrow::write_parquet(cot_general, paste0("data/galah/",Sys.Date(),"-cots.parquet"))
 ```
+
+# Read in data
+
+```{r}
+cot_general <- read_parquet("data/galah/2024-01-20-cots.parquet")
+```
+
 
 Rough clean
 
@@ -97,7 +104,7 @@ cot_mainland |>
 
 tidync way
 
-```{r}
+```{r, eval=FALSE}
 # open netcdf file and extract variables
 nc = tidync(paste0("data/",data_file))
 
@@ -208,6 +215,7 @@ system.time(
 ```
 
 ```{r}
+# Read in sea surface data
 OISST_data <- read_parquet("data/SST.parquet")
 
 # Create m and y variables
